@@ -1,0 +1,266 @@
+# ─────────────────────────────────────────────────────────────
+# TEAM-ALPHA traffic generators
+# ─────────────────────────────────────────────────────────────
+---
+# 1. Internal: always talks to hello in team-alpha
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traffic-internal
+  namespace: team-alpha
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: traffic-internal
+  template:
+    metadata:
+      labels:
+        app: traffic-internal
+    spec:
+      containers:
+        - name: curl
+          image: curlimages/curl:latest
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              while true; do
+                CODE=$(curl -s -o /dev/null -w '%{http_code}' http://hello.team-alpha.svc.cluster.local)
+                echo "[$(date -u +%H:%M:%S)] internal → hello.team-alpha: ${CODE}"
+                sleep 5
+              done
+---
+# 2. Cross-namespace: randomly hits team-beta or team-gamma every 10-25s
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traffic-cross
+  namespace: team-alpha
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: traffic-cross
+  template:
+    metadata:
+      labels:
+        app: traffic-cross
+    spec:
+      containers:
+        - name: curl
+          image: curlimages/curl:latest
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              TARGETS="hello.team-beta.svc.cluster.local hello.team-gamma.svc.cluster.local"
+              while true; do
+                TARGET=$(echo $TARGETS | tr ' ' '\n' | awk 'BEGIN{srand()} {l[NR]=$0} END{print l[int(rand()*NR)+1]}')
+                CODE=$(curl -s -o /dev/null -w '%{http_code}' http://${TARGET})
+                echo "[$(date -u +%H:%M:%S)] cross    → ${TARGET}: ${CODE}"
+                DELAY=$(awk 'BEGIN{srand(); print int(10+rand()*15)}')
+                sleep ${DELAY}
+              done
+---
+# 3. External: hits httpbin.org/ip to show which egress IP is used
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traffic-external
+  namespace: team-alpha
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: traffic-external
+  template:
+    metadata:
+      labels:
+        app: traffic-external
+    spec:
+      containers:
+        - name: curl
+          image: curlimages/curl:latest
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              while true; do
+                CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 http://example.com 2>/dev/null || echo "timeout")
+                echo "[$(date -u +%H:%M:%S)] external → example.com: ${CODE}"
+                sleep 20
+              done
+
+# ─────────────────────────────────────────────────────────────
+# TEAM-BETA traffic generators
+# ─────────────────────────────────────────────────────────────
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traffic-internal
+  namespace: team-beta
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: traffic-internal
+  template:
+    metadata:
+      labels:
+        app: traffic-internal
+    spec:
+      containers:
+        - name: curl
+          image: curlimages/curl:latest
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              while true; do
+                CODE=$(curl -s -o /dev/null -w '%{http_code}' http://hello.team-beta.svc.cluster.local)
+                echo "[$(date -u +%H:%M:%S)] internal → hello.team-beta: ${CODE}"
+                sleep 5
+              done
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traffic-cross
+  namespace: team-beta
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: traffic-cross
+  template:
+    metadata:
+      labels:
+        app: traffic-cross
+    spec:
+      containers:
+        - name: curl
+          image: curlimages/curl:latest
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              TARGETS="hello.team-alpha.svc.cluster.local hello.team-gamma.svc.cluster.local"
+              while true; do
+                TARGET=$(echo $TARGETS | tr ' ' '\n' | awk 'BEGIN{srand()} {l[NR]=$0} END{print l[int(rand()*NR)+1]}')
+                CODE=$(curl -s -o /dev/null -w '%{http_code}' http://${TARGET})
+                echo "[$(date -u +%H:%M:%S)] cross    → ${TARGET}: ${CODE}"
+                DELAY=$(awk 'BEGIN{srand(); print int(10+rand()*15)}')
+                sleep ${DELAY}
+              done
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traffic-external
+  namespace: team-beta
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: traffic-external
+  template:
+    metadata:
+      labels:
+        app: traffic-external
+    spec:
+      containers:
+        - name: curl
+          image: curlimages/curl:latest
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              while true; do
+                CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 http://example.com 2>/dev/null || echo "timeout")
+                echo "[$(date -u +%H:%M:%S)] external → example.com: ${CODE}"
+                sleep 20
+              done
+
+# ─────────────────────────────────────────────────────────────
+# TEAM-GAMMA traffic generators
+# ─────────────────────────────────────────────────────────────
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traffic-internal
+  namespace: team-gamma
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: traffic-internal
+  template:
+    metadata:
+      labels:
+        app: traffic-internal
+    spec:
+      containers:
+        - name: curl
+          image: curlimages/curl:latest
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              while true; do
+                CODE=$(curl -s -o /dev/null -w '%{http_code}' http://hello.team-gamma.svc.cluster.local)
+                echo "[$(date -u +%H:%M:%S)] internal → hello.team-gamma: ${CODE}"
+                sleep 5
+              done
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traffic-cross
+  namespace: team-gamma
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: traffic-cross
+  template:
+    metadata:
+      labels:
+        app: traffic-cross
+    spec:
+      containers:
+        - name: curl
+          image: curlimages/curl:latest
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              TARGETS="hello.team-alpha.svc.cluster.local hello.team-beta.svc.cluster.local"
+              while true; do
+                TARGET=$(echo $TARGETS | tr ' ' '\n' | awk 'BEGIN{srand()} {l[NR]=$0} END{print l[int(rand()*NR)+1]}')
+                CODE=$(curl -s -o /dev/null -w '%{http_code}' http://${TARGET})
+                echo "[$(date -u +%H:%M:%S)] cross    → ${TARGET}: ${CODE}"
+                DELAY=$(awk 'BEGIN{srand(); print int(10+rand()*15)}')
+                sleep ${DELAY}
+              done
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traffic-external
+  namespace: team-gamma
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: traffic-external
+  template:
+    metadata:
+      labels:
+        app: traffic-external
+    spec:
+      containers:
+        - name: curl
+          image: curlimages/curl:latest
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              while true; do
+                CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 http://example.com 2>/dev/null || echo "timeout")
+                echo "[$(date -u +%H:%M:%S)] external → example.com: ${CODE}"
+                sleep 20
+              done

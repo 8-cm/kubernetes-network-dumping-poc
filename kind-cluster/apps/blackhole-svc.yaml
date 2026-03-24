@@ -1,0 +1,43 @@
+# Blackhole services — selector targets a label that no pod carries.
+# Cilium sees no ready backends → sends TCP RST immediately.
+# Visible in Hubble/Wireshark as: SYN → RST (connection refused).
+# chaos generator uses these to produce deliberate "refused" errors every ~6th attempt.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: blackhole
+  namespace: team-alpha
+spec:
+  selector:
+    app: blackhole-nonexistent
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: blackhole
+  namespace: team-beta
+spec:
+  selector:
+    app: blackhole-nonexistent
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: blackhole
+  namespace: team-gamma
+spec:
+  selector:
+    app: blackhole-nonexistent
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80

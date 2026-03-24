@@ -1,0 +1,20 @@
+controller:
+  kind: DaemonSet
+  ingressClass: haproxy-shard-1
+  ingressClassResource:
+    name: haproxy-shard-1
+    controllerValue: haproxy.org/haproxy-shard-1
+    enabled: true
+    default: false
+  watchNamespace: "team-alpha"
+  nodeSelector:
+    kubernetes.io/hostname: multi-cp-cluster-worker5
+  replicaCount: 1
+  service:
+    type: ClusterIP
+  daemonset:
+    useHostPort: true
+    hostPorts:
+      http: 80
+      https: 443
+      stat: 1024

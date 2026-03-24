@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CLUSTER_CONFIG="$(dirname "$0")/cluster.yaml"
+CLUSTER_NAME="multi-cp-cluster"
+CILIUM_VERSION="1.16.5"
+KUBECONFIG_PATH="$(realpath "$(dirname "$0")")/${CLUSTER_NAME}.kubeconfig"
+# Use the real binary to bypass any kubectl/oc aliases
+KUBECTL="$(command -v kubectl)"
+
+ZELLIJ_PANE=false
+for arg in "$@"; do
+  [[ "$arg" == "--zellij" ]] && ZELLIJ_PANE=true
+done
+
+# ──────────────────────────────────────────────
+# 1. Create Kind cluster
+# ──────────────────────────────────────────────
+echo "==> Creating Kind cluster: ${CLUSTER_NAME}"
+kind create cluster --config "${CLUSTER_CONFIG}"
+
+echo "==> Exporting kubeconfig to ${KUBECONFIG_PATH}"
+kind get kubeconfig --name "${CLUSTER_NAME}" > "${KUBECONFIG_PATH}"
+export KUBECONFIG="${KUBECONFIG_PATH}"
+
+echo "==> Waiting for all nodes to register..."
+"${KUBECTL}" --kubeconfig "${KUBECONFIG_PATH}" wait --for=condition=Ready nodes --all --timeout=180s || true
+
+# ──────────────────────────────────────────────
+# 2. Label network nodes (worker5 and worker6)
+# ──────────────────────────────────────────────
+echo "==> Labelling network nodes"
+for node in "${CLUSTER_NAME}-worker5" "${CLUSTER_NAME}-worker6"; do
+  "${KUBECTL}" --kubeconfig "${KUBECONFIG_PATH}" label node "$node" \
+    node-role=network kubernetes.io/role=network --overwrite
+done
+
+# ──────────────────────────────────────────────
+# 3. Install Cilium via Helm
+# ──────────────────────────────────────────────
+echo "==> Adding Cilium Helm repo"
+helm repo add cilium https://helm.cilium.io/ --force-update
+helm repo update
+
+echo "==> Installing Cilium ${CILIUM_VERSION}"
+helm install cilium cilium/cilium \
+  --kubeconfig "${KUBECONFIG_PATH}" \
+  --version "${CILIUM_VERSION}" \
+  --namespace kube-system \
+  --set ipam.mode=kubernetes \
+  --set kubeProxyReplacement=true \
+  --set k8sServiceHost="${CLUSTER_NAME}-control-plane" \
+  --set k8sServicePort=6443 \
+  --set image.pullPolicy=IfNotPresent \
+  --set operator.replicas=2 \
+  --set egressGateway.enabled=true \
+  --set hubble.relay.enabled=true \
+  --set hubble.ui.enabled=true
+
+# ──────────────────────────────────────────────
+# 4. Wait for Cilium
+# ──────────────────────────────────────────────
+echo "==> Waiting for Cilium pods..."
+"${KUBECTL}" --kubeconfig "${KUBECONFIG_PATH}" rollout status daemonset/cilium -n kube-system --timeout=300s
+"${KUBECTL}" --kubeconfig "${KUBECONFIG_PATH}" rollout status deployment/cilium-operator -n kube-system --timeout=120s
+
+# ──────────────────────────────────────────────
+# 5. Install wget on all nodes (required by kube-dump)
+# ──────────────────────────────────────────────
+echo "==> Installing wget on all cluster nodes"
+for node in $(kind get nodes --name "${CLUSTER_NAME}" | grep -v 'external-load-balancer'); do
+  docker exec "$node" sh -c 'apt-get update -q 2>/dev/null && apt-get install -y wget -q' &
+done
+wait
+echo "    wget installed on all nodes"
+
+# ──────────────────────────────────────────────
+# 6. Metrics Server (kubelet-insecure-tls needed for Kind self-signed certs)
+# ──────────────────────────────────────────────
+echo "==> Installing metrics-server"
+"${KUBECTL}" --kubeconfig "${KUBECONFIG_PATH}" apply \
+  -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+
+echo "==> Patching metrics-server: disabling kubelet TLS verification (Kind)"
+"${KUBECTL}" --kubeconfig "${KUBECONFIG_PATH}" patch deployment metrics-server \
+  -n kube-system \
+  --type=json \
+  -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+
+"${KUBECTL}" --kubeconfig "${KUBECONFIG_PATH}" rollout status deployment/metrics-server \
+  -n kube-system --timeout=120s
+
+# ──────────────────────────────────────────────
+# 7. Egress namespaces + CiliumEgressGatewayPolicies
+# ──────────────────────────────────────────────
+echo ""
+echo "==> Setting up egress namespaces and policies"
+"$(dirname "$0")/egress/setup-egress.sh"
+
+# ──────────────────────────────────────────────
+# 8. HAProxy sharded ingress controllers
+# ──────────────────────────────────────────────
+echo ""
+echo "==> Installing HAProxy sharded ingress"
+"$(dirname "$0")/haproxy/setup-haproxy.sh"
+
+# ──────────────────────────────────────────────
+# 9. Demo apps (hello-kubernetes in each namespace)
+# ──────────────────────────────────────────────
+echo ""
+echo "==> Deploying demo apps"
+"$(dirname "$0")/apps/setup-apps.sh"
+
+# ──────────────────────────────────────────────
+# 8. Summary
+# ──────────────────────────────────────────────
+echo ""
+echo "==> Cluster ready. Node overview:"
+"${KUBECTL}" --kubeconfig "${KUBECONFIG_PATH}" get nodes -o wide
+
+echo ""
+echo "==> Cilium pods:"
+"${KUBECTL}" --kubeconfig "${KUBECONFIG_PATH}" get pods -n kube-system -l k8s-app=cilium -o wide
+
+echo ""
+echo "==> HAProxy shards:"
+"${KUBECTL}" --kubeconfig "${KUBECONFIG_PATH}" get pods -n haproxy-system -o wide
+
+echo ""
+echo "==> EgressGateway policies:"
+"${KUBECTL}" --kubeconfig "${KUBECONFIG_PATH}" get ciliumegressgatewaypolicies
+
+echo ""
+echo "==> KUBECONFIG exported to: ${KUBECONFIG_PATH}"
+
+# ──────────────────────────────────────────────
+# 8. Optional: open k9s in a new Zellij pane
+# ──────────────────────────────────────────────
+if [[ "${ZELLIJ_PANE}" == "true" ]]; then
+  if ! command -v zellij &>/dev/null; then
+    echo "==> [--zellij] zellij not found, skipping pane"
+  elif ! command -v k9s &>/dev/null; then
+    echo "==> [--zellij] k9s not found, skipping pane"
+  else
+    echo "==> Opening k9s in a new Zellij pane (right)"
+    zellij action new-pane --direction right -- \
+      bash -c "KUBECONFIG=${KUBECONFIG_PATH} k9s --context kind-${CLUSTER_NAME}"
+  fi
+fi

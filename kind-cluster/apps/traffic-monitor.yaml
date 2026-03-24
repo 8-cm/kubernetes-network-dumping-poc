@@ -1,0 +1,536 @@
+# ─────────────────────────────────────────────────────────────
+# TEAM-ALPHA traffic-monitor
+# Containers: init-html | gen-internal | gen-cross | gen-external | gen-chaos | nginx
+# All curl containers write to shared /data/out.log
+# Nginx serves universal dashboard (← incoming  → outgoing  ⇄ combined)
+# ─────────────────────────────────────────────────────────────
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traffic-monitor
+  namespace: team-alpha
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: traffic-monitor
+  template:
+    metadata:
+      labels:
+        app: traffic-monitor
+    spec:
+      initContainers:
+        - name: init-html
+          image: nginx:alpine
+          command: ["/bin/sh", "-c"]
+          args:
+            - envsubst '${NAMESPACE} ${POD_NAME} ${NODE_NAME}' < /tmpl/index.html > /html/index.html
+          env:
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          volumeMounts:
+            - name: config
+              mountPath: /tmpl/index.html
+              subPath: index.html
+            - name: html
+              mountPath: /html
+      containers:
+        # ── internal traffic ──────────────────────────────────
+        - name: gen-internal
+          image: curlimages/curl:latest
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              while true; do
+                CODE=$(curl -s -o /dev/null -w '%{http_code}' http://hello.team-alpha.svc.cluster.local)
+                printf '[%s] internal → hello.team-alpha.svc.cluster.local: %s\n' \
+                  "$(date -u +%H:%M:%S)" "$CODE" >> /data/out.log
+                sleep 5
+              done
+          volumeMounts:
+            - name: data
+              mountPath: /data
+        # ── cross-namespace traffic ───────────────────────────
+        - name: gen-cross
+          image: curlimages/curl:latest
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              TARGETS="hello.team-beta.svc.cluster.local hello.team-gamma.svc.cluster.local"
+              while true; do
+                TARGET=$(echo $TARGETS | tr ' ' '\n' | awk 'BEGIN{srand()} {l[NR]=$0} END{print l[int(rand()*NR)+1]}')
+                CODE=$(curl -s -o /dev/null -w '%{http_code}' http://${TARGET})
+                printf '[%s] cross    → %s: %s\n' "$(date -u +%H:%M:%S)" "$TARGET" "$CODE" >> /data/out.log
+                sleep $(awk 'BEGIN{srand(); print int(10+rand()*15)}')
+              done
+          volumeMounts:
+            - name: data
+              mountPath: /data
+        # ── external traffic ──────────────────────────────────
+        - name: gen-external
+          image: curlimages/curl:latest
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              while true; do
+                CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 http://example.com 2>/dev/null)
+                [ "$CODE" = "000" ] && CODE="refused"
+                printf '[%s] external → example.com: %s\n' "$(date -u +%H:%M:%S)" "$CODE" >> /data/out.log
+                sleep 20
+              done
+          volumeMounts:
+            - name: data
+              mountPath: /data
+        # ── chaos generator (cross-namespace via ingress, deliberate errors) ──
+        # Every 6th attempt: timeout (blackhole service, no endpoints)
+        # Every 4th attempt: HTTP 404 (bad path through ingress)
+        # Otherwise: normal request through ingress with Host header
+        - name: gen-chaos
+          image: curlimages/curl:latest
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              SHARD2=haproxy-shard-2-kubernetes-ingress.haproxy-system.svc.cluster.local
+              N=0
+              while true; do
+                N=$((N+1))
+                if [ $((N%2)) -eq 0 ]; then THOST="team-beta.example.com"; else THOST="team-gamma.example.com"; fi
+                if [ $((N%6)) -eq 0 ]; then
+                  CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 \
+                    http://blackhole.team-alpha.svc.cluster.local/ 2>/dev/null)
+                  [ "$CODE" = "000" ] && CODE="refused"
+                  printf '[%s] chaos → blackhole.team-alpha: %s\n' "$(date -u +%H:%M:%S)" "$CODE" >> /data/out.log
+                elif [ $((N%4)) -eq 0 ]; then
+                  CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+                    -H "Host: $THOST" "http://$SHARD2/chaos-not-found" 2>/dev/null)
+                  printf '[%s] chaos → %s/not-found: %s\n' "$(date -u +%H:%M:%S)" "$THOST" "$CODE" >> /data/out.log
+                else
+                  CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+                    -H "Host: $THOST" "http://$SHARD2/" 2>/dev/null)
+                  printf '[%s] chaos → %s: %s\n' "$(date -u +%H:%M:%S)" "$THOST" "$CODE" >> /data/out.log
+                fi
+                sleep 7
+              done
+          volumeMounts:
+            - name: data
+              mountPath: /data
+        # ── nginx dashboard ───────────────────────────────────
+        - name: nginx
+          image: nginx:alpine
+          ports:
+            - containerPort: 8080
+          command: ["/bin/sh", "-c"]
+          args:
+            - touch /data/in.log /data/out.log && chmod 666 /data/in.log /data/out.log && exec nginx -g 'daemon off;'
+          volumeMounts:
+            - name: config
+              mountPath: /etc/nginx/conf.d/default.conf
+              subPath: default.conf
+            - name: html
+              mountPath: /usr/share/nginx/html
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: config
+          configMap:
+            name: traffic-dashboard
+        - name: html
+          emptyDir: {}
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: traffic-monitor
+  namespace: team-alpha
+spec:
+  selector:
+    app: traffic-monitor
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: traffic-monitor
+  namespace: team-alpha
+spec:
+  ingressClassName: haproxy-shard-1
+  rules:
+    - host: traffic-alpha.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: traffic-monitor
+                port:
+                  number: 80
+
+# ─────────────────────────────────────────────────────────────
+# TEAM-BETA traffic-monitor
+# ─────────────────────────────────────────────────────────────
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traffic-monitor
+  namespace: team-beta
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: traffic-monitor
+  template:
+    metadata:
+      labels:
+        app: traffic-monitor
+    spec:
+      initContainers:
+        - name: init-html
+          image: nginx:alpine
+          command: ["/bin/sh", "-c"]
+          args:
+            - envsubst '${NAMESPACE} ${POD_NAME} ${NODE_NAME}' < /tmpl/index.html > /html/index.html
+          env:
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          volumeMounts:
+            - name: config
+              mountPath: /tmpl/index.html
+              subPath: index.html
+            - name: html
+              mountPath: /html
+      containers:
+        - name: gen-internal
+          image: curlimages/curl:latest
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              while true; do
+                CODE=$(curl -s -o /dev/null -w '%{http_code}' http://hello.team-beta.svc.cluster.local)
+                printf '[%s] internal → hello.team-beta.svc.cluster.local: %s\n' \
+                  "$(date -u +%H:%M:%S)" "$CODE" >> /data/out.log
+                sleep 5
+              done
+          volumeMounts:
+            - name: data
+              mountPath: /data
+        - name: gen-cross
+          image: curlimages/curl:latest
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              TARGETS="hello.team-alpha.svc.cluster.local hello.team-gamma.svc.cluster.local"
+              while true; do
+                TARGET=$(echo $TARGETS | tr ' ' '\n' | awk 'BEGIN{srand()} {l[NR]=$0} END{print l[int(rand()*NR)+1]}')
+                CODE=$(curl -s -o /dev/null -w '%{http_code}' http://${TARGET})
+                printf '[%s] cross    → %s: %s\n' "$(date -u +%H:%M:%S)" "$TARGET" "$CODE" >> /data/out.log
+                sleep $(awk 'BEGIN{srand(); print int(10+rand()*15)}')
+              done
+          volumeMounts:
+            - name: data
+              mountPath: /data
+        - name: gen-external
+          image: curlimages/curl:latest
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              while true; do
+                CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 http://example.com 2>/dev/null)
+                [ "$CODE" = "000" ] && CODE="refused"
+                printf '[%s] external → example.com: %s\n' "$(date -u +%H:%M:%S)" "$CODE" >> /data/out.log
+                sleep 20
+              done
+          volumeMounts:
+            - name: data
+              mountPath: /data
+        - name: gen-chaos
+          image: curlimages/curl:latest
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              SHARD1=haproxy-shard-1-kubernetes-ingress.haproxy-system.svc.cluster.local
+              SHARD2=haproxy-shard-2-kubernetes-ingress.haproxy-system.svc.cluster.local
+              N=0
+              while true; do
+                N=$((N+1))
+                if [ $((N%2)) -eq 0 ]; then
+                  THOST="team-alpha.example.com"; SHARD=$SHARD1
+                else
+                  THOST="team-gamma.example.com"; SHARD=$SHARD2
+                fi
+                if [ $((N%6)) -eq 0 ]; then
+                  CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 \
+                    http://blackhole.team-beta.svc.cluster.local/ 2>/dev/null)
+                  [ "$CODE" = "000" ] && CODE="refused"
+                  printf '[%s] chaos → blackhole.team-beta: %s\n' "$(date -u +%H:%M:%S)" "$CODE" >> /data/out.log
+                elif [ $((N%4)) -eq 0 ]; then
+                  CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+                    -H "Host: $THOST" "http://$SHARD/chaos-not-found" 2>/dev/null)
+                  printf '[%s] chaos → %s/not-found: %s\n' "$(date -u +%H:%M:%S)" "$THOST" "$CODE" >> /data/out.log
+                else
+                  CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+                    -H "Host: $THOST" "http://$SHARD/" 2>/dev/null)
+                  printf '[%s] chaos → %s: %s\n' "$(date -u +%H:%M:%S)" "$THOST" "$CODE" >> /data/out.log
+                fi
+                sleep 7
+              done
+          volumeMounts:
+            - name: data
+              mountPath: /data
+        - name: nginx
+          image: nginx:alpine
+          ports:
+            - containerPort: 8080
+          command: ["/bin/sh", "-c"]
+          args:
+            - touch /data/in.log /data/out.log && chmod 666 /data/in.log /data/out.log && exec nginx -g 'daemon off;'
+          volumeMounts:
+            - name: config
+              mountPath: /etc/nginx/conf.d/default.conf
+              subPath: default.conf
+            - name: html
+              mountPath: /usr/share/nginx/html
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: config
+          configMap:
+            name: traffic-dashboard
+        - name: html
+          emptyDir: {}
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: traffic-monitor
+  namespace: team-beta
+spec:
+  selector:
+    app: traffic-monitor
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: traffic-monitor
+  namespace: team-beta
+spec:
+  ingressClassName: haproxy-shard-2
+  rules:
+    - host: traffic-beta.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: traffic-monitor
+                port:
+                  number: 80
+
+# ─────────────────────────────────────────────────────────────
+# TEAM-GAMMA traffic-monitor
+# ─────────────────────────────────────────────────────────────
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traffic-monitor
+  namespace: team-gamma
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: traffic-monitor
+  template:
+    metadata:
+      labels:
+        app: traffic-monitor
+    spec:
+      initContainers:
+        - name: init-html
+          image: nginx:alpine
+          command: ["/bin/sh", "-c"]
+          args:
+            - envsubst '${NAMESPACE} ${POD_NAME} ${NODE_NAME}' < /tmpl/index.html > /html/index.html
+          env:
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          volumeMounts:
+            - name: config
+              mountPath: /tmpl/index.html
+              subPath: index.html
+            - name: html
+              mountPath: /html
+      containers:
+        - name: gen-internal
+          image: curlimages/curl:latest
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              while true; do
+                CODE=$(curl -s -o /dev/null -w '%{http_code}' http://hello.team-gamma.svc.cluster.local)
+                printf '[%s] internal → hello.team-gamma.svc.cluster.local: %s\n' \
+                  "$(date -u +%H:%M:%S)" "$CODE" >> /data/out.log
+                sleep 5
+              done
+          volumeMounts:
+            - name: data
+              mountPath: /data
+        - name: gen-cross
+          image: curlimages/curl:latest
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              TARGETS="hello.team-alpha.svc.cluster.local hello.team-beta.svc.cluster.local"
+              while true; do
+                TARGET=$(echo $TARGETS | tr ' ' '\n' | awk 'BEGIN{srand()} {l[NR]=$0} END{print l[int(rand()*NR)+1]}')
+                CODE=$(curl -s -o /dev/null -w '%{http_code}' http://${TARGET})
+                printf '[%s] cross    → %s: %s\n' "$(date -u +%H:%M:%S)" "$TARGET" "$CODE" >> /data/out.log
+                sleep $(awk 'BEGIN{srand(); print int(10+rand()*15)}')
+              done
+          volumeMounts:
+            - name: data
+              mountPath: /data
+        - name: gen-external
+          image: curlimages/curl:latest
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              while true; do
+                CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 http://example.com 2>/dev/null)
+                [ "$CODE" = "000" ] && CODE="refused"
+                printf '[%s] external → example.com: %s\n' "$(date -u +%H:%M:%S)" "$CODE" >> /data/out.log
+                sleep 20
+              done
+          volumeMounts:
+            - name: data
+              mountPath: /data
+        - name: gen-chaos
+          image: curlimages/curl:latest
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              SHARD1=haproxy-shard-1-kubernetes-ingress.haproxy-system.svc.cluster.local
+              SHARD2=haproxy-shard-2-kubernetes-ingress.haproxy-system.svc.cluster.local
+              N=0
+              while true; do
+                N=$((N+1))
+                if [ $((N%2)) -eq 0 ]; then
+                  THOST="team-alpha.example.com"; SHARD=$SHARD1
+                else
+                  THOST="team-beta.example.com"; SHARD=$SHARD2
+                fi
+                if [ $((N%6)) -eq 0 ]; then
+                  CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 \
+                    http://blackhole.team-gamma.svc.cluster.local/ 2>/dev/null)
+                  [ "$CODE" = "000" ] && CODE="refused"
+                  printf '[%s] chaos → blackhole.team-gamma: %s\n' "$(date -u +%H:%M:%S)" "$CODE" >> /data/out.log
+                elif [ $((N%4)) -eq 0 ]; then
+                  CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+                    -H "Host: $THOST" "http://$SHARD/chaos-not-found" 2>/dev/null)
+                  printf '[%s] chaos → %s/not-found: %s\n' "$(date -u +%H:%M:%S)" "$THOST" "$CODE" >> /data/out.log
+                else
+                  CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+                    -H "Host: $THOST" "http://$SHARD/" 2>/dev/null)
+                  printf '[%s] chaos → %s: %s\n' "$(date -u +%H:%M:%S)" "$THOST" "$CODE" >> /data/out.log
+                fi
+                sleep 7
+              done
+          volumeMounts:
+            - name: data
+              mountPath: /data
+        - name: nginx
+          image: nginx:alpine
+          ports:
+            - containerPort: 8080
+          command: ["/bin/sh", "-c"]
+          args:
+            - touch /data/in.log /data/out.log && chmod 666 /data/in.log /data/out.log && exec nginx -g 'daemon off;'
+          volumeMounts:
+            - name: config
+              mountPath: /etc/nginx/conf.d/default.conf
+              subPath: default.conf
+            - name: html
+              mountPath: /usr/share/nginx/html
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: config
+          configMap:
+            name: traffic-dashboard
+        - name: html
+          emptyDir: {}
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: traffic-monitor
+  namespace: team-gamma
+spec:
+  selector:
+    app: traffic-monitor
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: traffic-monitor
+  namespace: team-gamma
+spec:
+  ingressClassName: haproxy-shard-2
+  rules:
+    - host: traffic-gamma.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: traffic-monitor
+                port:
+                  number: 80

@@ -1,0 +1,9 @@
+# kubeconfig contains cluster credentials
+kind-cluster/*.kubeconfig
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
