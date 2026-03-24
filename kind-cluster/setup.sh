@@ -60,6 +60,7 @@ helm install cilium cilium/cilium \
   --set image.pullPolicy=IfNotPresent \
   --set operator.replicas=2 \
   --set egressGateway.enabled=true \
+  --set bpf.masquerade=true \
   --set hubble.relay.enabled=true \
   --set hubble.ui.enabled=true
 
