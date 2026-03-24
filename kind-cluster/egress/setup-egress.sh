@@ -28,14 +28,14 @@ $K get crd ciliumegressgatewaypolicies.cilium.io
 # ──────────────────────────────────────────────
 # 2. Resolve network node IPs dynamically
 # ──────────────────────────────────────────────
-echo "==> Resolving network node IPs"
-NETWORK0_IP=$($K get node "${CLUSTER_NAME}-network-00" \
-  -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')
-NETWORK1_IP=$($K get node "${CLUSTER_NAME}-network-01" \
-  -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')
+echo "==> Resolving network node IPs (by network-index label)"
+NETWORK0_IP=$($K get node -l 'network-index=0' \
+  -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
+NETWORK1_IP=$($K get node -l 'network-index=1' \
+  -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
 
-echo "    network-00 → team-alpha egress IP: ${NETWORK0_IP}"
-echo "    network-01 → team-beta  egress IP: ${NETWORK1_IP}"
+echo "    network-index=0 (worker5) → team-alpha egress IP: ${NETWORK0_IP}"
+echo "    network-index=1 (worker6) → team-beta  egress IP: ${NETWORK1_IP}"
 
 # ──────────────────────────────────────────────
 # 3. Create namespaces
@@ -67,10 +67,10 @@ spec:
   egressGateway:
     nodeSelector:
       matchLabels:
-        kubernetes.io/hostname: ${CLUSTER_NAME}-network-00
+        network-index: "0"
     egressIP: ${NETWORK0_IP}
 ---
-# team-beta → egress via network-01 (${NETWORK1_IP})
+# team-beta → egress via network-01 / worker6 (${NETWORK1_IP})
 apiVersion: cilium.io/v2
 kind: CiliumEgressGatewayPolicy
 metadata:
@@ -87,7 +87,7 @@ spec:
   egressGateway:
     nodeSelector:
       matchLabels:
-        kubernetes.io/hostname: ${CLUSTER_NAME}-network-01
+        network-index: "1"
     egressIP: ${NETWORK1_IP}
 EOF
 

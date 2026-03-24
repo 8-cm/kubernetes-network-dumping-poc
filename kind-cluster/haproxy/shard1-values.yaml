@@ -8,7 +8,7 @@ controller:
     default: false
   watchNamespace: "team-alpha"
   nodeSelector:
-    kubernetes.io/hostname: a-cluster-network-00
+    network-index: "0"
   tolerations:
     - key: role
       operator: Equal

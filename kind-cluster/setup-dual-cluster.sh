@@ -166,15 +166,16 @@ open_k9s() {
 wire_peers() {
   echo "==> Resolving peer ingress endpoints (Docker bridge IPs — hostPort 80)"
   local A_N0 A_N1 B_N0 B_N1
-  A_N0=$(node_docker_ip "${CLUSTER_A}-network-00")
-  A_N1=$(node_docker_ip "${CLUSTER_A}-network-01")
-  B_N0=$(node_docker_ip "${CLUSTER_B}-network-00")
-  B_N1=$(node_docker_ip "${CLUSTER_B}-network-01")
+  # Kind auto-names network nodes as worker5 (shard-1) and worker6 (shard-2)
+  A_N0=$(node_docker_ip "${CLUSTER_A}-worker5")
+  A_N1=$(node_docker_ip "${CLUSTER_A}-worker6")
+  B_N0=$(node_docker_ip "${CLUSTER_B}-worker5")
+  B_N1=$(node_docker_ip "${CLUSTER_B}-worker6")
 
-  printf '  %-40s  %s\n' "a-cluster shard-1 (network-00)" "${A_N0}:80"
-  printf '  %-40s  %s\n' "a-cluster shard-2 (network-01)" "${A_N1}:80"
-  printf '  %-40s  %s\n' "b-cluster shard-1 (network-00)" "${B_N0}:80"
-  printf '  %-40s  %s\n' "b-cluster shard-2 (network-01)" "${B_N1}:80"
+  printf '  %-40s  %s\n' "a-cluster shard-1 (worker5/network-00)" "${A_N0}:80"
+  printf '  %-40s  %s\n' "a-cluster shard-2 (worker6/network-01)" "${A_N1}:80"
+  printf '  %-40s  %s\n' "b-cluster shard-1 (worker5/network-00)" "${B_N0}:80"
+  printf '  %-40s  %s\n' "b-cluster shard-2 (worker6/network-01)" "${B_N1}:80"
 
   echo "==> Creating peer-ingress ConfigMaps"
   # a-cluster pods → b-cluster IPs + domain; b-cluster pods → a-cluster IPs + domain

@@ -27,15 +27,19 @@ echo "==> Waiting for all nodes to register..."
 "${KUBECTL}" --kubeconfig "${KUBECONFIG_PATH}" wait --for=condition=Ready nodes --all --timeout=180s || true
 
 # ──────────────────────────────────────────────
-# 2. Label network nodes (worker5 and worker6)
+# 2. Label network nodes (Kind auto-names them worker5 / worker6)
 # ──────────────────────────────────────────────
 echo "==> Labelling and tainting network nodes"
-for node in "${CLUSTER_NAME}-network-00" "${CLUSTER_NAME}-network-01"; do
-  "${KUBECTL}" --kubeconfig "${KUBECONFIG_PATH}" label node "$node" \
-    node-role=network kubernetes.io/role=network --overwrite
-  "${KUBECTL}" --kubeconfig "${KUBECONFIG_PATH}" taint node "$node" \
-    role=network:NoSchedule --overwrite
-done
+# worker5 = shard-1 (network-index=0), worker6 = shard-2 (network-index=1)
+"${KUBECTL}" --kubeconfig "${KUBECONFIG_PATH}" label node "${CLUSTER_NAME}-worker5" \
+  node-role=network kubernetes.io/role=network network-index=0 --overwrite
+"${KUBECTL}" --kubeconfig "${KUBECONFIG_PATH}" taint node "${CLUSTER_NAME}-worker5" \
+  role=network:NoSchedule --overwrite
+
+"${KUBECTL}" --kubeconfig "${KUBECONFIG_PATH}" label node "${CLUSTER_NAME}-worker6" \
+  node-role=network kubernetes.io/role=network network-index=1 --overwrite
+"${KUBECTL}" --kubeconfig "${KUBECONFIG_PATH}" taint node "${CLUSTER_NAME}-worker6" \
+  role=network:NoSchedule --overwrite
 
 # ──────────────────────────────────────────────
 # 3. Install Cilium via Helm
@@ -51,7 +55,7 @@ helm install cilium cilium/cilium \
   --namespace kube-system \
   --set ipam.mode=kubernetes \
   --set kubeProxyReplacement=true \
-  --set k8sServiceHost="${CLUSTER_NAME}-control-plane-00" \
+  --set k8sServiceHost="${CLUSTER_NAME}-control-plane" \
   --set k8sServicePort=6443 \
   --set image.pullPolicy=IfNotPresent \
   --set operator.replicas=2 \

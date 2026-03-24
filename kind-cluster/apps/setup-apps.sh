@@ -69,10 +69,10 @@ done
 # ──────────────────────────────────────────────
 # 7. Resolve shard node IPs
 # ──────────────────────────────────────────────
-SHARD1_IP=$($K get node "${CLUSTER_NAME}-network-00" \
-  -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')
-SHARD2_IP=$($K get node "${CLUSTER_NAME}-network-01" \
-  -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')
+SHARD1_IP=$($K get node -l 'network-index=0' \
+  -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
+SHARD2_IP=$($K get node -l 'network-index=1' \
+  -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
 
 # ──────────────────────────────────────────────
 # 8. Summary

@@ -11,24 +11,16 @@ networking:
 nodes:
   # --- Control Plane Nodes ---
   - role: control-plane
-    name: control-plane-00
   - role: control-plane
-    name: control-plane-01
   - role: control-plane
-    name: control-plane-02
 
   # --- Worker Nodes ---
   - role: worker
-    name: worker-00
   - role: worker
-    name: worker-01
   - role: worker
-    name: worker-02
   - role: worker
-    name: worker-03
 
   # --- Network Nodes — tainted + labelled post-creation via setup.sh ---
-  - role: worker
-    name: network-00   # haproxy-shard-1
-  - role: worker
-    name: network-01   # haproxy-shard-2
+  # Kind names these worker5 (shard-1) and worker6 (shard-2)
+  - role: worker  # network-00 / haproxy-shard-1
+  - role: worker  # network-01 / haproxy-shard-2
