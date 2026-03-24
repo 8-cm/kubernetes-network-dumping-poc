@@ -52,8 +52,9 @@ stop() {
   sudo ifconfig lo0 -alias "${ALIAS_SHARD2}" 2>/dev/null || true
 
   echo "==> Removing /etc/hosts entries (requires sudo)"
-  sed "/# ${HOSTS_TAG}/,/# end ${HOSTS_TAG}/d" /etc/hosts > /tmp/hosts.tmp \
-    && sudo cp /tmp/hosts.tmp /etc/hosts && rm /tmp/hosts.tmp
+  local hosts_tmp="/tmp/hosts-${CLUSTER_NAME}.tmp"
+  sed "/# ${HOSTS_TAG}/,/# end ${HOSTS_TAG}/d" /etc/hosts > "${hosts_tmp}" \
+    && sudo cp "${hosts_tmp}" /etc/hosts && rm -f "${hosts_tmp}"
 
   echo "Done."
 }
@@ -61,42 +62,44 @@ stop() {
 # ──────────────────────────────────────────────
 print_table() {
   local D="${CLUSTER_NAME}"
-  local LT="┌──────────────────────────────────────────────┬──────────────────────────────────────────────────────┐"
-  local LH="├──────────────────────────────────────────────┼──────────────────────────────────────────────────────┤"
-  local LB="└──────────────────────────────────────────────┴──────────────────────────────────────────────────────┘"
+  # Columns: URL=34, Description=46  (all ASCII content keeps printf padding exact)
+  local LT="┌────────────────────────────────────┬────────────────────────────────────────────────┐"
+  local LH="├────────────────────────────────────┼────────────────────────────────────────────────┤"
+  local LB="└────────────────────────────────────┴────────────────────────────────────────────────┘"
 
   printf '\n  Cluster: %s\n\n' "${CLUSTER_NAME}"
   printf '  %s\n' "${LT}"
-  printf '  │ %-44s │ %-52s │\n' "URL" "What you will find"
+  printf '  │ %-34s │ %-46s │\n' "URL" "Description"
   printf '  %s\n' "${LH}"
-  printf '  │ %-44s │ %-52s │\n' \
-    "http://team-alpha.${D}"    "team-alpha hello app — ← in / → out / ⇄ combined"
-  printf '  │ %-44s │ %-52s │\n' \
-    "http://team-beta.${D}"     "team-beta  hello app — ← in / → out / ⇄ combined"
-  printf '  │ %-44s │ %-52s │\n' \
-    "http://team-gamma.${D}"    "team-gamma hello app — ← in / → out / ⇄ combined"
+  printf '  │ %-34s │ %-46s │\n' \
+    "http://team-alpha.${D}"    "hello [shard-1 ingress] [egress: network-00]"
+  printf '  │ %-34s │ %-46s │\n' \
+    "http://team-beta.${D}"     "hello [shard-2 ingress] [egress: network-01]"
+  printf '  │ %-34s │ %-46s │\n' \
+    "http://team-gamma.${D}"    "hello [shard-2 ingress] [egress: any node]"
   printf '  %s\n' "${LH}"
-  printf '  │ %-44s │ %-52s │\n' \
-    "http://traffic-alpha.${D}" "team-alpha traffic monitor — → out + chaos streams"
-  printf '  │ %-44s │ %-52s │\n' \
-    "http://traffic-beta.${D}"  "team-beta  traffic monitor — → out + chaos streams"
-  printf '  │ %-44s │ %-52s │\n' \
-    "http://traffic-gamma.${D}" "team-gamma traffic monitor — → out + chaos streams"
+  printf '  │ %-34s │ %-46s │\n' \
+    "http://traffic-alpha.${D}" "traffic (shard-1): internal/cross/peer/chaos"
+  printf '  │ %-34s │ %-46s │\n' \
+    "http://traffic-beta.${D}"  "traffic (shard-2): internal/cross/peer/chaos"
+  printf '  │ %-34s │ %-46s │\n' \
+    "http://traffic-gamma.${D}" "traffic (shard-2): internal/cross/peer/chaos"
   printf '  %s\n' "${LH}"
-  printf '  │ %-44s │ %-52s │\n' \
+  printf '  │ %-34s │ %-46s │\n' \
     "http://localhost:${HUBBLE_PORT}" \
-    "Hubble UI — network flows, service map, DNS"
+    "Hubble UI: L3/L4 flows, DNS, egress-gw SNAT"
   if [[ -n "${RADAR_PORT}" ]]; then
-    printf '  │ %-44s │ %-52s │\n' \
+    printf '  │ %-34s │ %-46s │\n' \
       "http://localhost:${RADAR_PORT}" \
-      "Radar — cluster resource overview"
+      "radar UI (cluster resources / events)"
   fi
   printf '  %s\n' "${LB}"
-  printf '\n  Stop:  ./port-forward.sh stop'
+  printf '\n  kubectl:   export KUBECONFIG=%s\n' "${KUBECONFIG_PATH}"
+  printf   '  stop:      ./port-forward.sh stop\n'
   if [[ "${CLUSTER_NAME}" == "a-cluster" ]]; then
-    printf '\n  Switch to b-cluster:  CLUSTER_NAME=b-cluster ALIAS_SHARD1=127.0.0.4 ALIAS_SHARD2=127.0.0.5 HUBBLE_PORT=12001 ./port-forward.sh'
+    printf '  b-cluster: CLUSTER_NAME=b-cluster ALIAS_SHARD1=127.0.0.4 ALIAS_SHARD2=127.0.0.5 HUBBLE_PORT=12001 ./port-forward.sh\n'
   fi
-  printf '\n\n'
+  printf '\n'
 }
 
 # ──────────────────────────────────────────────
@@ -106,8 +109,9 @@ start() {
   sudo ifconfig lo0 alias "${ALIAS_SHARD2}" 255.255.255.0
 
   echo "==> Updating /etc/hosts (requires sudo)"
-  sed "/# ${HOSTS_TAG}/,/# end ${HOSTS_TAG}/d" /etc/hosts > /tmp/hosts.tmp \
-    && sudo cp /tmp/hosts.tmp /etc/hosts && rm /tmp/hosts.tmp
+  local hosts_tmp="/tmp/hosts-${CLUSTER_NAME}.tmp"
+  sed "/# ${HOSTS_TAG}/,/# end ${HOSTS_TAG}/d" /etc/hosts > "${hosts_tmp}" \
+    && sudo cp "${hosts_tmp}" /etc/hosts && rm -f "${hosts_tmp}"
   printf '%s\n' "${HOSTS_BLOCK}" | sudo tee -a /etc/hosts > /dev/null
 
   echo "==> Starting port-forwards"
@@ -133,7 +137,11 @@ start() {
 
   sleep 2
 
-  print_table
+  if [[ -n "${ZELLIJ_TABLE_FILE:-}" ]]; then
+    print_table >> "${ZELLIJ_TABLE_FILE}"
+  else
+    print_table
+  fi
 }
 
 # ──────────────────────────────────────────────

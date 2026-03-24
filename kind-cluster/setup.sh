@@ -16,8 +16,12 @@ done
 # ──────────────────────────────────────────────
 # 1. Create Kind cluster
 # ──────────────────────────────────────────────
-echo "==> Creating Kind cluster: ${CLUSTER_NAME} (config: ${CLUSTER_CONFIG})"
-kind create cluster --config "${CLUSTER_CONFIG}"
+if kind get clusters 2>/dev/null | grep -q "^${CLUSTER_NAME}$"; then
+  echo "==> ${CLUSTER_NAME} already exists — skipping cluster creation"
+else
+  echo "==> Creating Kind cluster: ${CLUSTER_NAME} (config: ${CLUSTER_CONFIG})"
+  kind create cluster --config "${CLUSTER_CONFIG}"
+fi
 
 echo "==> Exporting kubeconfig to ${KUBECONFIG_PATH}"
 kind get kubeconfig --name "${CLUSTER_NAME}" > "${KUBECONFIG_PATH}"
@@ -49,7 +53,7 @@ helm repo add cilium https://helm.cilium.io/ --force-update
 helm repo update
 
 echo "==> Installing Cilium ${CILIUM_VERSION}"
-helm install cilium cilium/cilium \
+helm upgrade --install cilium cilium/cilium \
   --kubeconfig "${KUBECONFIG_PATH}" \
   --version "${CILIUM_VERSION}" \
   --namespace kube-system \
@@ -88,11 +92,15 @@ echo "==> Installing metrics-server"
 "${KUBECTL}" --kubeconfig "${KUBECONFIG_PATH}" apply \
   -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
 
-echo "==> Patching metrics-server: disabling kubelet TLS verification (Kind)"
-"${KUBECTL}" --kubeconfig "${KUBECONFIG_PATH}" patch deployment metrics-server \
-  -n kube-system \
-  --type=json \
-  -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+if ! "${KUBECTL}" --kubeconfig "${KUBECONFIG_PATH}" get deployment metrics-server \
+    -n kube-system -o jsonpath='{.spec.template.spec.containers[0].args}' 2>/dev/null \
+    | grep -q 'kubelet-insecure-tls'; then
+  echo "==> Patching metrics-server: disabling kubelet TLS verification (Kind)"
+  "${KUBECTL}" --kubeconfig "${KUBECONFIG_PATH}" patch deployment metrics-server \
+    -n kube-system \
+    --type=json \
+    -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+fi
 
 "${KUBECTL}" --kubeconfig "${KUBECONFIG_PATH}" rollout status deployment/metrics-server \
   -n kube-system --timeout=120s

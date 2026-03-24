@@ -29,11 +29,11 @@ Subcommand:
 Options (all optional):
   --create=<a|b|ab>   Cluster(s) to create             [default: ab]
   --delete=<a|b|ab>   Delete cluster(s) and exit
-  --zellij            Open k9s in Zellij pane(s) after setup
-                      With ab: right pane for a-cluster, then split-down for b-cluster
-  --tmux              Open k9s in tmux pane(s) after setup
-                      With ab: split-h for a-cluster, then split-v for b-cluster
-  --radar             Launch 'radar' TUI in the background for each created cluster
+  --zellij            Open k9s (and radar if --radar) in dedicated Zellij tabs
+                      Each tool gets its own tab; clusters split right within the tab
+  --tmux              Open k9s (and radar if --radar) in tmux split panes
+  --radar             Launch radar TUI for each created cluster
+                      With --zellij: dedicated "radar" tab; --tmux: split; else background
   -h, --help          Show this help and exit
 
 Examples:
@@ -76,6 +76,9 @@ done
 
 # Default to ab if no create/delete/wire specified
 [[ -z "$CREATE" && -z "$DELETE" && "$WIRE_ONLY" == false ]] && CREATE="ab"
+
+# Name the current tab so we can return to it after opening tool tabs.
+$USE_ZELLIJ && zellij action rename-tab "setup" 2>/dev/null || true
 
 CREATE_A=false; CREATE_B=false
 [[ "$CREATE" == *a* ]] && CREATE_A=true
@@ -144,22 +147,66 @@ EOF
   done
 }
 
+# Opens a named zellij tab and runs each command in a pane.
+# The first command runs in the tab's default shell pane; subsequent ones split right.
+open_zellij_tab() {
+  local tab_name="$1"; shift
+  local first=true
+  zellij action new-tab --name "${tab_name}"
+  sleep 0.5
+  for cmd in "$@"; do
+    if $first; then
+      zellij action write-chars "${cmd}"$'\n'
+      first=false
+    else
+      zellij action new-pane --direction right
+      sleep 0.5
+      zellij action write-chars "${cmd}"$'\n'
+    fi
+  done
+}
+
 open_k9s() {
   local kc="$1" name="$2" direction="${3:-right}"
   if ! command -v k9s &>/dev/null; then
     echo "  [skip] k9s not found in PATH"
     return
   fi
-  echo "==> Opening k9s for ${name} (${direction})"
-  if $USE_ZELLIJ; then
-    zellij action new-pane --direction "${direction}" -- \
-      bash -c "KUBECONFIG=${kc} k9s --context kind-${name}"
-  elif $USE_TMUX; then
-    if [[ "${direction}" == "right" ]]; then
-      tmux split-window -h "KUBECONFIG=${kc} k9s --context kind-${name}"
-    else
-      tmux split-window -v "KUBECONFIG=${kc} k9s --context kind-${name}"
+  if pgrep -qf "k9s.*--context kind-${name}" 2>/dev/null; then
+    echo "  [skip] k9s for ${name} already running"
+    return
+  fi
+  echo "==> Opening k9s for ${name}"
+  if [[ "${direction}" == "right" ]]; then
+    tmux split-window -h "KUBECONFIG=${kc} k9s --context kind-${name}"
+  else
+    tmux split-window -v "KUBECONFIG=${kc} k9s --context kind-${name}"
+  fi
+}
+
+open_radar() {
+  local kc="$1" name="$2" port="${3:-9280}"
+  if ! command -v radar &>/dev/null; then
+    echo "  [skip] radar not found in PATH"
+    return
+  fi
+  if pgrep -qf "radar.*${name}" 2>/dev/null; then
+    echo "  [skip] radar for ${name} already running"
+    return
+  fi
+  echo "==> Opening radar for ${name} (port ${port})"
+  local radar_cmd="radar -kubeconfig ${kc} -port ${port}"
+  if $USE_TMUX; then
+    tmux split-window -h "${radar_cmd}"
+  else
+    local pid_file="/tmp/kind-radar-${name}.pid"
+    if [[ -f "${pid_file}" ]] && kill -0 "$(cat "${pid_file}")" 2>/dev/null; then
+      echo "  [skip] radar for ${name} already running (PID $(cat "${pid_file}"))"
+      return
     fi
+    ${radar_cmd} &
+    echo $! > "${pid_file}"
+    echo "    radar launched in background (PID $!)"
   fi
 }
 
@@ -227,53 +274,112 @@ if $CREATE_A && $CREATE_B; then
 fi
 
 # ──────────────────────────────────────────────────────
-# 3. Radar
+# 3. Radar  (zellij: dedicated tab with one pane per cluster)
 # ──────────────────────────────────────────────────────
 if $USE_RADAR; then
-  if ! command -v radar &>/dev/null; then
-    echo "==> [--radar] 'radar' not found in PATH — skipping"
+  if $USE_ZELLIJ && command -v radar &>/dev/null; then
+    RADAR_CMDS=()
+    if $CREATE_A && ! pgrep -qf "radar.*a-cluster" 2>/dev/null; then
+      RADAR_CMDS+=("radar -kubeconfig ${KC_A} -port 9280")
+    elif $CREATE_A; then echo "  [skip] radar for ${CLUSTER_A} already running"; fi
+    if $CREATE_B && ! pgrep -qf "radar.*b-cluster" 2>/dev/null; then
+      RADAR_CMDS+=("radar -kubeconfig ${KC_B} -port 9281")
+    elif $CREATE_B; then echo "  [skip] radar for ${CLUSTER_B} already running"; fi
+    [[ ${#RADAR_CMDS[@]} -gt 0 ]] && open_zellij_tab "radar" "${RADAR_CMDS[@]}"
   else
-    if $CREATE_A; then
-      KUBECONFIG="${KC_A}" radar &
-      echo "==> radar launched for ${CLUSTER_A} (PID $!)"
-    fi
-    if $CREATE_B; then
-      KUBECONFIG="${KC_B}" radar &
-      echo "==> radar launched for ${CLUSTER_B} (PID $!)"
-    fi
+    $CREATE_A && open_radar "${KC_A}" "${CLUSTER_A}" 9280
+    $CREATE_B && open_radar "${KC_B}" "${CLUSTER_B}" 9281
   fi
 fi
 
 # ──────────────────────────────────────────────────────
-# 4. k9s panes
+# 4. k9s  (zellij: dedicated tab with one pane per cluster)
 # ──────────────────────────────────────────────────────
 if $USE_ZELLIJ || $USE_TMUX; then
-  if $CREATE_A && $CREATE_B; then
-    open_k9s "${KC_A}" "${CLUSTER_A}" right
-    sleep 1   # give zellij/tmux time to focus new pane
-    open_k9s "${KC_B}" "${CLUSTER_B}" down
-  elif $CREATE_A; then
-    open_k9s "${KC_A}" "${CLUSTER_A}" right
-  elif $CREATE_B; then
-    open_k9s "${KC_B}" "${CLUSTER_B}" right
+  if $USE_ZELLIJ && command -v k9s &>/dev/null; then
+    K9S_CMDS=()
+    if $CREATE_A && ! pgrep -qf "k9s.*--context kind-${CLUSTER_A}" 2>/dev/null; then
+      K9S_CMDS+=("KUBECONFIG=${KC_A} k9s --context kind-${CLUSTER_A}")
+    elif $CREATE_A; then echo "  [skip] k9s for ${CLUSTER_A} already running"; fi
+    if $CREATE_B && ! pgrep -qf "k9s.*--context kind-${CLUSTER_B}" 2>/dev/null; then
+      K9S_CMDS+=("KUBECONFIG=${KC_B} k9s --context kind-${CLUSTER_B}")
+    elif $CREATE_B; then echo "  [skip] k9s for ${CLUSTER_B} already running"; fi
+    [[ ${#K9S_CMDS[@]} -gt 0 ]] && open_zellij_tab "k9s" "${K9S_CMDS[@]}"
+  elif $USE_TMUX; then
+    if $CREATE_A && $CREATE_B; then
+      open_k9s "${KC_A}" "${CLUSTER_A}" right
+      sleep 1
+      open_k9s "${KC_B}" "${CLUSTER_B}" right
+    elif $CREATE_A; then
+      open_k9s "${KC_A}" "${CLUSTER_A}" right
+    elif $CREATE_B; then
+      open_k9s "${KC_B}" "${CLUSTER_B}" right
+    fi
   fi
 fi
 
 # ──────────────────────────────────────────────────────
-# 5. Port-forwards
+# 5. Port-forwards  (both clusters in parallel)
 # ──────────────────────────────────────────────────────
+# Return to the setup tab so sudo prompts are visible.
+$USE_ZELLIJ && zellij action go-to-tab-name "setup" 2>/dev/null || true
+
+# Collect table output to a file; displayed in a "urls" tab after port-forwards start.
+TABLE_FILE=""
+if $USE_ZELLIJ; then
+  TABLE_FILE="/tmp/kind-tables-$$.txt"
+  rm -f "${TABLE_FILE}"
+fi
+export ZELLIJ_TABLE_FILE="${TABLE_FILE}"
+
 echo ""
-echo "==> Starting port-forwards"
+echo "==> Starting port-forwards (sudo required for port 80)"
+# Pre-cache sudo so both clusters can start in parallel without double-prompting.
+sudo -v
 
 if $CREATE_A; then
-  CLUSTER_NAME="${CLUSTER_A}" "${SCRIPT_DIR}/port-forward.sh"
+  CLUSTER_NAME="${CLUSTER_A}" "${SCRIPT_DIR}/port-forward.sh" &
 fi
-
 if $CREATE_B; then
-  # b-cluster uses different loopback IPs to avoid conflict with a-cluster
   CLUSTER_NAME="${CLUSTER_B}" \
   ALIAS_SHARD1="127.0.0.4" \
   ALIAS_SHARD2="127.0.0.5" \
   HUBBLE_PORT="12001" \
-    "${SCRIPT_DIR}/port-forward.sh"
+    "${SCRIPT_DIR}/port-forward.sh" &
+fi
+wait
+
+# Open all cluster ingress URLs in a single browser window.
+if [[ "$(uname)" == "Darwin" ]]; then
+  echo ""
+  echo "==> Opening browser"
+  ALL_URLS=()
+  if $CREATE_A; then
+    ALL_URLS+=(
+      "http://team-alpha.${CLUSTER_A}"
+      "http://team-beta.${CLUSTER_A}"
+      "http://team-gamma.${CLUSTER_A}"
+      "http://traffic-alpha.${CLUSTER_A}"
+      "http://traffic-beta.${CLUSTER_A}"
+      "http://traffic-gamma.${CLUSTER_A}"
+      "http://localhost:12000"
+    )
+  fi
+  if $CREATE_B; then
+    ALL_URLS+=(
+      "http://team-alpha.${CLUSTER_B}"
+      "http://team-beta.${CLUSTER_B}"
+      "http://team-gamma.${CLUSTER_B}"
+      "http://traffic-alpha.${CLUSTER_B}"
+      "http://traffic-beta.${CLUSTER_B}"
+      "http://traffic-gamma.${CLUSTER_B}"
+      "http://localhost:12001"
+    )
+  fi
+  [[ ${#ALL_URLS[@]} -gt 0 ]] && open "${ALL_URLS[@]}"
+fi
+
+# Open combined URL table as a read-only "urls" tab (last tab opened).
+if $USE_ZELLIJ && [[ -s "${TABLE_FILE}" ]]; then
+  open_zellij_tab "urls" "less -S '${TABLE_FILE}'"
 fi
