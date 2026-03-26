@@ -1,9 +1,8 @@
-# kubeconfig contains cluster credentials
-kind-cluster/*.kubeconfig
+# Generated kubeconfig files (contain cluster credentials — never commit)
+*.kubeconfig
+
+# Port-forward PID files
+*.pids
 
 # macOS
 .DS_Store
-
-# Python
-__pycache__/
-*.pyc
