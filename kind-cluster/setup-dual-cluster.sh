@@ -1,6 +1,30 @@
 #!/usr/bin/env bash
-# Sets up two Kind clusters (a-cluster + b-cluster), wires them together for
-# cross-cluster traffic, and optionally opens k9s panes and launches radar.
+# Orchestrate a dual Kind cluster environment for network observability demos.
+#
+# Human-friendly: One command to get both clusters running, wired together,
+# with port-forwards active and browser tabs open. Re-run safely at any time —
+# existing clusters are detected and skipped. Use the "wire" subcommand alone
+# to refresh cross-cluster routing after a Docker/host restart.
+#
+# Technical: Delegates single-cluster setup to setup.sh. After both clusters
+# exist, resolves each cluster's network node Docker bridge IPs and injects
+# them into peer-ingress ConfigMaps so pods can send cross-cluster HTTP traffic.
+# Tool tabs (radar, k9s) are opened in Zellij before port-forwards start so
+# sudo prompts are visible in the setup tab. Both clusters' port-forwards run
+# in parallel (background &) after sudo -v pre-caches credentials.
+#
+# Subcommands:
+#   wire   Re-inject peer Docker IPs without recreating clusters (use after restart)
+#
+# Options:
+#   --create=<a|b|ab>   Which cluster(s) to create       [default: ab]
+#   --delete=<a|b|ab>   Delete cluster(s) and exit
+#   --zellij            Open k9s + radar in named Zellij tabs
+#   --tmux              Open k9s + radar in tmux split panes
+#   --radar             Also launch the radar TUI for each cluster
+#   -h, --help          Show usage and exit
+#
+# Requires: kind, helm, kubectl, docker; optionally: zellij, tmux, k9s, radar
 set -euo pipefail
 
 SCRIPT_DIR="$(realpath "$(dirname "$0")")"
@@ -111,11 +135,44 @@ fi
 # ──────────────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────────────
+# ──────────────────────────────────────────────
+# Look up the Docker bridge IP of a Kind cluster node container.
+#
+# Human-friendly: Given a node name like "a-cluster-worker5", returns the IP
+# that other Docker containers can use to reach it on the Docker bridge network.
+#
+# Technical: Runs `docker inspect` with a Go template that iterates all attached
+# networks and prints the first IP address found. Kind nodes each run as a Docker
+# container named exactly as the Kind node name. Returns empty string if the
+# container is not found or has no IP.
+#
+# Args:
+#   $1  container_name  Docker container name of the Kind node (e.g. a-cluster-worker5)
+# Returns: Docker bridge IP on stdout (e.g. 172.18.0.5); empty string on failure
+# ──────────────────────────────────────────────
 node_docker_ip() {
   docker inspect "$1" \
     --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null
 }
 
+# ──────────────────────────────────────────────
+# Run setup.sh for one cluster, skipping creation if the cluster already exists.
+#
+# Human-friendly: Idempotent cluster launcher — calling this twice is safe.
+# The second call detects the existing cluster and prints a skip message.
+#
+# Technical: Uses `kind get clusters` to check for cluster existence before
+# delegating to setup.sh. Passes cluster identity and HAProxy shard Helm values
+# via environment variables rather than positional arguments so setup.sh can be
+# called standalone with the same interface.
+#
+# Args:
+#   $1  name    Kind cluster name (e.g. a-cluster)
+#   $2  config  Path to Kind cluster YAML config file
+#   $3  s1val   Path to Helm values YAML for HAProxy shard-1
+#   $4  s2val   Path to Helm values YAML for HAProxy shard-2
+# Returns: exit code from setup.sh, or 0 if cluster already exists
+# ──────────────────────────────────────────────
 run_setup() {
   local name="$1" config="$2" s1val="$3" s2val="$4"
   if kind get clusters 2>/dev/null | grep -q "^${name}$"; then
@@ -130,6 +187,25 @@ run_setup() {
   fi
 }
 
+# ──────────────────────────────────────────────
+# Inject peer cluster ingress endpoints into every team namespace as a ConfigMap.
+#
+# Human-friendly: Tells pods in one cluster where to find the other cluster's
+# ingress nodes. Without this, cross-cluster traffic falls back to example.com.
+#
+# Technical: Applies (creates or replaces) the "peer-ingress" ConfigMap in
+# team-alpha, team-beta, and team-gamma. Pods reference it via envFrom, making
+# PEER_SHARD1, PEER_SHARD2, and PEER_DOMAIN available as environment variables.
+# The ConfigMap is applied with `kubectl apply -f -` via a heredoc so it is
+# idempotent (subsequent calls update in place rather than failing on conflict).
+#
+# Args:
+#   $1  KC           Path to kubeconfig for the target cluster
+#   $2  SHARD1       Docker bridge IP of the peer cluster's network-00 node (worker5)
+#   $3  SHARD2       Docker bridge IP of the peer cluster's network-01 node (worker6)
+#   $4  PEER_DOMAIN  Peer cluster name used as ingress Host header domain (e.g. b-cluster)
+# Returns: last exit code from kubectl apply (non-zero on API server error)
+# ──────────────────────────────────────────────
 apply_peer_cm() {
   local KC="$1" SHARD1="$2" SHARD2="$3" PEER_DOMAIN="$4"
   for ns in team-alpha team-beta team-gamma; do
@@ -147,6 +223,25 @@ EOF
   done
 }
 
+# ──────────────────────────────────────────────
+# Open a named Zellij tab and run one shell command per pane.
+#
+# Human-friendly: Creates a new Zellij tab with a descriptive name and
+# launches each passed command in its own pane, split to the right.
+#
+# Technical: Creates the tab with `zellij action new-tab --name`. The first
+# command is typed into the tab's default shell pane using write-chars + \n
+# (simulating keyboard input rather than --command, which Zellij does not
+# support in this version). Each subsequent command gets a new right-split pane
+# via `new-pane --direction right` followed by write-chars. A 0.5s sleep after
+# each pane creation prevents write-chars from firing before the pane shell is ready.
+#
+# Args:
+#   $1      tab_name  Name to assign to the new Zellij tab
+#   $2..N   cmd       Shell commands to run — one per pane (left to right)
+# Returns: 0 always (Zellij action errors are not propagated)
+# Side effects: leaves a persistent Zellij tab open after the script exits
+# ──────────────────────────────────────────────
 # Opens a named zellij tab and runs each command in a pane.
 # The first command runs in the tab's default shell pane; subsequent ones split right.
 open_zellij_tab() {
@@ -166,6 +261,23 @@ open_zellij_tab() {
   done
 }
 
+# ──────────────────────────────────────────────
+# Split the current tmux pane and launch k9s for a cluster. (tmux only)
+#
+# Human-friendly: Opens a side-by-side k9s view in tmux for a cluster.
+# For Zellij, k9s is launched via open_zellij_tab (dedicated "k9s" tab) instead.
+#
+# Technical: Guards against missing k9s binary and duplicate instances (pgrep
+# on the --context flag string). Splits the current tmux window horizontally
+# or vertically depending on the direction argument. KUBECONFIG is passed as
+# an env var prefix on the tmux command so k9s sees the correct cluster.
+#
+# Args:
+#   $1  kc         Path to kubeconfig file
+#   $2  name       Cluster name — used in pgrep match (k9s.*--context kind-NAME)
+#   $3  direction  tmux split direction: "right" (split -h) or "down" (split -v) [default: right]
+# Returns: 0 if skipped; tmux exit code otherwise
+# ──────────────────────────────────────────────
 open_k9s() {
   local kc="$1" name="$2" direction="${3:-right}"
   if ! command -v k9s &>/dev/null; then
@@ -184,6 +296,26 @@ open_k9s() {
   fi
 }
 
+# ──────────────────────────────────────────────
+# Launch the radar Kubernetes TUI for a cluster.
+#
+# Human-friendly: Starts radar (a web-based cluster resource browser) and lets
+# it open a browser tab automatically. For Zellij it gets a dedicated "radar"
+# tab; for tmux a horizontal split; otherwise a detached background process.
+#
+# Technical: Skips if radar is not in PATH or if a radar process already exists
+# for this cluster (pgrep matches on the -kubeconfig path which embeds the
+# cluster name). In background mode writes the PID to /tmp/kind-radar-NAME.pid
+# and checks it on subsequent calls to avoid duplicate launches. Radar is started
+# without -no-browser so it automatically opens its UI in the default browser.
+#
+# Args:
+#   $1  kc    Path to kubeconfig file (used as -kubeconfig flag and for pgrep match)
+#   $2  name  Cluster name — used in pgrep pattern and PID file name
+#   $3  port  Local port for the radar HTTP server [default: 9280]
+# Returns: 0 always; radar error output is not captured
+# Side effects: may open a browser tab; writes PID file in /tmp
+# ──────────────────────────────────────────────
 open_radar() {
   local kc="$1" name="$2" port="${3:-9280}"
   if ! command -v radar &>/dev/null; then
@@ -210,6 +342,27 @@ open_radar() {
   fi
 }
 
+# ──────────────────────────────────────────────
+# Resolve Docker bridge IPs and wire cross-cluster peer ingress routing.
+#
+# Human-friendly: Run this after both clusters exist (or after a Docker restart
+# that changes node IPs) to enable cross-cluster traffic. Without it, pods fall
+# back to example.com for external requests.
+#
+# Technical:
+#   1. Calls node_docker_ip() for all four network nodes (a-cluster worker5/6,
+#      b-cluster worker5/6) to get their current Docker bridge IPs.
+#   2. Calls apply_peer_cm() twice: once to inject b-cluster IPs into a-cluster's
+#      namespaces, and once to inject a-cluster IPs into b-cluster's namespaces.
+#   3. Restarts hello and traffic-external deployments in all three namespaces
+#      of both clusters so they pick up the updated peer-ingress ConfigMap values.
+#      Errors from rollout restart are suppressed (pods may not exist yet).
+#   4. Waits for all hello deployments to reach ready state (120s timeout each).
+#
+# Args:    none
+# Globals: CLUSTER_A, CLUSTER_B, KC_A, KC_B, KUBECTL
+# Returns: non-zero if any `rollout status` times out
+# ──────────────────────────────────────────────
 wire_peers() {
   echo "==> Resolving peer ingress endpoints (Docker bridge IPs — hostPort 80)"
   local A_N0 A_N1 B_N0 B_N1

@@ -1,4 +1,40 @@
 #!/usr/bin/env bash
+# Set up a single Kind cluster with Cilium, HAProxy ingress, egress gateway,
+# metrics-server, and demo application workloads.
+#
+# Human-friendly: Run once per cluster. It is fully idempotent — safe to re-run
+# if interrupted. Skips cluster creation when the cluster already exists and
+# only applies the metrics-server patch when the flag is not already present.
+#
+# Technical: Executes 9 sequential steps with set -euo pipefail (aborts on any
+# error). Delegates egress policy setup to egress/setup-egress.sh, HAProxy
+# installation to haproxy/setup-haproxy.sh, and app deployment to
+# apps/setup-apps.sh. wget is installed on all nodes in parallel (background &)
+# as it is required by kube-dump tooling used in observability exercises.
+#
+# Steps:
+#   1. kind create cluster (idempotent — skipped if cluster already exists)
+#   2. Export kubeconfig to CLUSTER_NAME.kubeconfig
+#   3. Label + taint network nodes (worker5: network-index=0, worker6: network-index=1)
+#   4. Install Cilium via Helm (kube-proxy replacement, egressGateway, bpf.masquerade, Hubble)
+#   5. Wait for Cilium daemonset + operator rollout
+#   6. Install wget on all nodes in parallel (for kube-dump)
+#   7. Install metrics-server; patch --kubelet-insecure-tls if not already present
+#   8. Apply egress namespaces + CiliumEgressGatewayPolicies (alpha, beta)
+#   9. Install HAProxy sharded ingress (shard-1 on network-00, shard-2 on network-01)
+#  10. Deploy demo apps (hello nginx, traffic-monitor, traffic generators, blackhole svc)
+#
+# Env vars (set by setup-dual-cluster.sh or passed manually):
+#   CLUSTER_NAME    Kind cluster name                     [default: a-cluster]
+#   CLUSTER_CONFIG  Path to Kind cluster YAML             [default: ./cluster.yaml]
+#   SHARD1_VALUES   Path to Helm values for HAProxy shard-1
+#   SHARD2_VALUES   Path to Helm values for HAProxy shard-2
+#
+# Args:
+#   --zellij   After setup, open k9s in a new Zellij pane (right split)
+#
+# Returns: non-zero on any step failure (set -euo pipefail propagates immediately)
+# Requires: kind, helm, kubectl, docker
 set -euo pipefail
 
 CLUSTER_CONFIG="${CLUSTER_CONFIG:-$(dirname "$0")/cluster.yaml}"

@@ -17,7 +17,7 @@ Designed as a hands-on POC for network analysis with `tcpdump`, `tshark`, Hubble
 | DNS queries (CoreDNS) | any node — UDP/TCP port 53 |
 | Cross-cluster TCP (Docker bridge) | host Docker bridge interface |
 
-See [docs/observability.md](docs/observability.md) for exact tcpdump/tshark commands and vantage points.
+See [docs/observability.md](kind-cluster/docs/observability.md) for exact tcpdump/tshark commands and vantage points.
 
 ## Architecture
 
@@ -29,7 +29,7 @@ Two identical Kind clusters (`a-cluster`, `b-cluster`), each with:
 
 The clusters communicate directly over the Docker bridge network — no overlay tunnel.
 
-See [docs/architecture.md](docs/architecture.md) for full diagrams.
+See [docs/architecture.md](kind-cluster/docs/architecture.md) for full diagrams.
 
 ## Quick start
 
@@ -80,8 +80,8 @@ CLUSTER_NAME=b-cluster ALIAS_SHARD1=127.0.0.4 ALIAS_SHARD2=127.0.0.5 HUBBLE_PORT
 | `team-beta`  | shard-2 (worker6 / network-01) | `egress-team-beta` pinned to network-01 | All beta pod egress SNATs to worker6 Docker IP |
 | `team-gamma` | shard-2 (worker6 / network-01) | none | Egress source IP is non-deterministic (pod's node) |
 
-See [docs/namespaces.md](docs/namespaces.md) for per-namespace workload detail.
-See [docs/traffic-flows.md](docs/traffic-flows.md) for every communication flow with Mermaid diagrams.
+See [docs/namespaces.md](kind-cluster/docs/namespaces.md) for per-namespace workload detail.
+See [docs/traffic-flows.md](kind-cluster/docs/traffic-flows.md) for every communication flow with Mermaid diagrams.
 
 ## Repo structure
 

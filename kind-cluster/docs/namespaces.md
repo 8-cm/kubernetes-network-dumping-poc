@@ -70,23 +70,30 @@ One pod with five containers sharing a `/data/out.log` volume. Provides a comple
 
 ```mermaid
 graph TD
-    subgraph "traffic-monitor pod"
-        GI["gen-internal\nevery 5s\nhello.<ns>.svc.cluster.local"]
-        GX2["gen-cross\nevery 10-25s\nhello.<other-ns>.svc.cluster.local"]
-        GE["gen-external\nevery 20s\nPEER_SHARD1 or PEER_SHARD2\nHost: team-<ns>.<peer-domain>"]
-        GCH["gen-chaos\nevery 7s\nblackhole svc / 404 path / normal"]
-        NX2["nginx :8080\nserves same dashboard\nreads /data/out.log"]
-        VOL2["/data/out.log\nshared by all generators"]
+    SAME_NS["hello.NAMESPACE.svc.cluster.local\nClusterIP — DNAT to pod"]
+    OTHER_NS["hello.OTHER-NS.svc.cluster.local\ncross-namespace ClusterIP"]
+    PEER["peer cluster shard IP\negress-gw SNAT for alpha/beta"]
+    BH["blackhole.NAMESPACE.svc\nno endpoints — Cilium sends RST"]
+    VOL2["/data/out.log\nshared volume"]
+
+    subgraph POD["traffic-monitor pod"]
+        GI["gen-internal\nevery 5s"]
+        GX2["gen-cross\nevery 10-25s"]
+        GE["gen-external\nevery 20s"]
+        GCH["gen-chaos\nevery 7s"]
+        NX2["nginx :8080\nserves dashboard"]
     end
 
-    SAME_NS["hello.<ns>.svc.cluster.local\n(ClusterIP DNAT to pod)"] <-- GI
-    OTHER_NS["hello.<other-ns>.svc.cluster.local\n(cross-namespace ClusterIP)"] <-- GX2
-    PEER["peer cluster shard IP\n(routed via egress-gw for alpha/beta)"] <-- GE
-    BH["blackhole.<ns>.svc\n(no endpoints -> Cilium RST)"] <-- GCH
-    GI --> VOL2
+    GI  -->|curl| SAME_NS
+    GX2 -->|curl| OTHER_NS
+    GE  -->|curl via egress-gw| PEER
+    GCH -->|curl| BH
+
+    GI  --> VOL2
     GX2 --> VOL2
-    GE --> VOL2
+    GE  --> VOL2
     GCH --> VOL2
+    VOL2 -->|polls every 2s| NX2
 ```
 
 ### gen-chaos pattern
