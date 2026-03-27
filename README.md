@@ -10,7 +10,7 @@ Designed as a hands-on POC for network analysis with `tcpdump`, `tshark`, Hubble
 |--------------------|---------------|
 | Pod to pod (same namespace, ClusterIP svc) | worker node veth or pod netns |
 | Pod to pod (cross-namespace, ClusterIP svc) | worker node, Hubble flow graph |
-| Ingress path (host to pod via HAProxy shard) | network node eth0 (`docker exec worker5 tcpdump`) |
+| Ingress path (host to pod via HAProxy shard) | network node eth0 (`oc debug node/worker5 -- chroot /host tcpdump`) |
 | Egress pinned (alpha/beta) — deterministic SNAT | network node eth0 — source IP always = network node IP |
 | Egress unpinned (gamma) — non-deterministic | any worker node — source IP = pod's current node |
 | TCP RST from blackhole service (no endpoints) | pod netns or worker — SYN immediately followed by RST |

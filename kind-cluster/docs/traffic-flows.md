@@ -90,7 +90,7 @@ sequenceDiagram
 
 **What you'll see in nginx**: the source IP in `in.log` is the HAProxy pod's IP (not your browser IP). HAProxy adds `X-Forwarded-For` with the original client IP but nginx doesn't log it by default.
 
-**Capture on worker5**: `docker exec a-cluster-worker5 tcpdump -i eth0 tcp port 80` — shows incoming TCP from the port-forward address and HAProxy's proxy connections to pod IPs.
+**Capture on worker5**: `oc debug node/a-cluster-worker5 -- chroot /host tcpdump -i eth0 tcp port 80` — shows incoming TCP from the port-forward address and HAProxy's proxy connections to pod IPs.
 
 ---
 
@@ -202,7 +202,7 @@ sequenceDiagram
 
 **High frequency**: every curl loop re-resolves unless glibc caches the record (TTL 5s in CoreDNS). With ~6 generators per namespace and 3 namespaces per cluster, expect 30+ DNS queries per minute.
 
-**Capture**: `docker exec a-cluster-worker tcpdump -i any udp port 53` — shows all DNS queries from pods scheduled on that node.
+**Capture**: `oc debug node/a-cluster-worker -- chroot /host tcpdump -i any udp port 53` — shows all DNS queries from pods scheduled on that node.
 
 ---
 
