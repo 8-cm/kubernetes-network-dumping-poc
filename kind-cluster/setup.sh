@@ -135,6 +135,10 @@ globalDefault: false
 description: "Required by oc debug node on non-OpenShift clusters"
 EOF
 
+echo "==> Creating dummy namespace"
+"${KUBECTL}" --kubeconfig "${KUBECONFIG_PATH}" create namespace dummy --dry-run=client -o yaml \
+  | "${KUBECTL}" --kubeconfig "${KUBECONFIG_PATH}" apply -f -
+
 # ──────────────────────────────────────────────
 # 7. Metrics Server (kubelet-insecure-tls needed for Kind self-signed certs)
 # ──────────────────────────────────────────────
