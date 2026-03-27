@@ -173,19 +173,25 @@ kubectl logs -n team-alpha deploy/traffic-monitor -c gen-chaos --tail=10
 # [14:35:06] chaos → http://haproxy-shard-1/: 200
 ```
 
-404 přichází pravidelně, ne náhodně. Zachytil jsem provoz na worker2 kde `traffic-monitor` běží — tentokrát filtruji podle HAProxy pod IP (ne ClusterIP, tu Cilium interceptuje v eBPF):
+404 přichází pravidelně, ne náhodně. Zachytil jsem provoz na worker2 kde `traffic-monitor` běží — 404 jde přes HAProxy (reálné TCP spojení), takže je viditelné přímo na nodu bez nsenter:
 
 ```bash
+# Příkaz 1 — zachyť 30s a ulož na node, pak drž pod naživu
 oc debug node/a-cluster-worker2 -n dummy --image=nicolaka/netshoot -- \
   chroot /host bash -c '
-    PID=$(crictl inspect $(crictl ps -q --name gen-chaos) | jq .info.pid)
-    nsenter -t $PID -n -- tcpdump -i eth0 -n \
+    tcpdump -i any -n \
       -w /tmp/chaos-404.pcap \
       "host 10.244.8.140 or host 10.244.4.119" &
     sleep 30 && kill %1 && sleep infinity'
 ```
 
-Po stažení pcap (`oc -n dummy cp <pod>:/host/tmp/chaos-404.pcap ~/captures/chaos-404.pcap`) jsem otevřel ve Wireshark a použil filtr `http`:
+```bash
+# Příkaz 2 — ve druhém terminálu stáhni pcap
+kubectl get pod -n dummy   # zjisti název debug podu
+oc -n dummy cp <pod-name>:/host/tmp/chaos-404.pcap ~/captures/chaos-404.pcap
+```
+
+Po stažení pcap jsem otevřel ve Wireshark a použil filtr `http`:
 
 ```
 GET /chaos-not-found HTTP/1.1
