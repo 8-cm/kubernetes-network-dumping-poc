@@ -111,6 +111,8 @@ kind-cluster/
 │   ├── traffic-generators.yaml  # Standalone traffic-internal/cross/external pods
 │   ├── traffic-dashboard-cm.yaml
 │   └── blackhole-svc.yaml       # No-backend service — Cilium sends TCP RST immediately
+├── tools/
+│   └── kube-dump.sh             # Bulk capture across pods/nodes via nsenter (image: nicolaka/netshoot)
 └── docs/
     ├── architecture.md          # Node layout, Cilium, HAProxy, cross-cluster wiring
     ├── namespaces.md            # Per-namespace workloads and communication patterns

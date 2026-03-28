@@ -11,6 +11,7 @@ How to observe every layer of communication in the environment using Hubble, tcp
 | **radar** | Web-based cluster resource browser | `radar -kubeconfig a-cluster.kubeconfig -port 9280` |
 | **tcpdump** | Raw packet capture at any vantage point | `oc debug node/<node> -- chroot /host tcpdump ...` |
 | **tshark** | Wireshark CLI — decode HTTP, DNS, follow streams | `oc debug node/<node> -- chroot /host tshark ...` |
+| **kube-dump** | Hromadné zachytávání napříč pody a nody | `KUBECONFIG=a-cluster.kubeconfig ./tools/kube-dump.sh -l app=... -e 'tcpdump ...'` |
 
 ---
 
@@ -239,7 +240,70 @@ Celá cesta od zdrojového podu v a-cluster až po cílový pod v b-cluster, vč
 
 ---
 
-### Quick reference — všechny capture pointy
+### Přehled capture pointů
+
+```
+ INTERFACE          KDE                SMĚR     VIDÍŠ
+ ─────────────────────────────────────────────────────────────────────────────
+ eth0 (pod)         pod netns          ↕ obojí  odchozí: co app posílá, dst=ClusterIP/peer IP
+                                                příchozí: po DNAT, dst=pod IP
+
+ lo (pod)           pod netns          ↕ obojí  jen localhost: sidecar↔kontejner 127.0.0.1
+                                                !! veth toto nevidí vůbec
+
+ vethXXXXXX         node netns         ↕ obojí  identické co pod eth0 (druhý konec stejného kabelu)
+ (node strana)                                  dostupné bez nsenter — jeden veth = jeden pod
+
+ eth0 (node)        node netns         ↕ obojí  odchozí: SNAT provoz (egress-gw), VXLAN outer
+                                                příchozí: z LB/port-forward, VXLAN od jiných nodů
+                                                hostPort traffic v obou směrech
+
+ lo (node)          node netns         ↕ obojí  jen localhost: kubelet↔apiserver, healthchecky
+                                                pod-to-node přes 127.0.0.1
+
+ cilium_host        node netns         ↕ obojí  odchozí: node stack → pod CIDR
+                                                příchozí: pod CIDR → node stack
+
+ cilium_vxlan       node netns         ↕ obojí  odchozí: inner pakety před zabalením do VXLAN
+ nebo geneve0                                   příchozí: rozbalené inner pakety z jiných nodů
+                                                bez outer VXLAN hlaviček — čisté pod IPs
+
+ any (v node netns) node netns         ↕ obojí  eth0 + všechny veth* + lo + cilium_*
+                                                = veškerý provoz nodu vč. všech podů
+                                                pozor: pakety se duplikují (eth0 + veth + vxlan)
+
+ any (v pod netns)  pod netns          ↕ obojí  eth0 + lo tohoto podu
+                                                = jen provoz tohoto konkrétního podu
+ ─────────────────────────────────────────────────────────────────────────────
+ KIND SPECIFIC
+
+ lo0 (macOS host)   host               ↕ obojí  port-forward traffic (127.0.0.2/3 → kubectl tunel)
+
+ br-kind            host (Linux only)  ↕ obojí  L2 mezi všemi Kind nody, cross-cluster komunikace
+ ─────────────────────────────────────────────────────────────────────────────
+```
+
+**`any` závisí na network namespace:**
+
+```
+ node netns (oc debug node)     →  any = eth0 + veth* (všechny pody) + cilium_* + lo
+ pod netns  (nsenter -t PID -n) →  any = eth0 + lo tohoto podu pouze
+```
+
+**NAT a směr — co vidíš kde:**
+
+```
+ ODCHOZÍ (app → ven):
+   pod eth0 / veth  →  src=pod IP,  dst=ClusterIP        před DNAT
+   node eth0        →  src=pod IP,  dst=pod IP            po DNAT
+                       src=node IP, dst=peer              po SNAT (egress-gw)
+
+ PŘÍCHOZÍ (odpověď → app):
+   node eth0        →  src=pod IP,  dst=pod IP            před reverse DNAT
+   veth / pod eth0  →  src=pod IP,  dst=pod IP            po reverse DNAT
+```
+
+### Quick reference — příkazy
 
 ```
  LEVEL              PŘÍKAZ
@@ -248,6 +312,9 @@ Celá cesta od zdrojového podu v a-cluster až po cílový pod v b-cluster, vč
 
  node eth0          oc debug node/<node> -- \
                       chroot /host tcpdump -i eth0 -n [filter]
+
+ node any           oc debug node/<node> -- \
+                      chroot /host tcpdump -i any -n [filter]
 
  node veth          oc debug node/<node> -- chroot /host bash -c '
  (pod uplink)         PID=$(crictl inspect \
@@ -261,17 +328,22 @@ Celá cesta od zdrojového podu v a-cluster až po cílový pod v b-cluster, vč
  (bez exec do podu)   PID=$(crictl inspect \
                         $(crictl ps -q --name <app>) | jq .info.pid)
                       nsenter -t $PID -n -- tcpdump -i eth0 -n'
-                    vidíš: veškerý provoz ven/dovnitř podu po/před NAT
 
  pod lo             oc debug node/<node> -- chroot /host bash -c '
- (loopback uvnitř    PID=$(crictl inspect \
-  pod netns)           $(crictl ps -q --name <app>) | jq .info.pid)
+ (sidecar traffic)    PID=$(crictl inspect \
+                        $(crictl ps -q --name <app>) | jq .info.pid)
                       nsenter -t $PID -n -- tcpdump -i lo -n'
-                    vidíš: sidecar↔kontejner přes 127.0.0.1
-                           VETH TOTO NEVIDÍ — lo zůstává v pod netns
+
+ pod any            oc debug node/<node> -- chroot /host bash -c '
+ (eth0 + lo podu)     PID=$(crictl inspect \
+                        $(crictl ps -q --name <app>) | jq .info.pid)
+                      nsenter -t $PID -n -- tcpdump -i any -n'
 
  VXLAN tunnel       oc debug node/<node> -- \
  (cross-node)         chroot /host tcpdump -i eth0 -n 'udp port 8472'
+
+ cilium_vxlan       oc debug node/<node> -- \
+ (inner pakety)       chroot /host tcpdump -i cilium_vxlan -n
 
  Docker bridge      sudo tcpdump -i br-kind -n            # Linux host only
 ```
@@ -532,3 +604,197 @@ kubectl --kubeconfig a-cluster.kubeconfig get pod -n team-gamma \
 ```
 
 Pro team-alpha opakuj stejný test — src IP na b-clusteru se NEZMĚNÍ bez ohledu na to, na který worker pod přistane. To je garance egress gateway.
+
+---
+
+## kube-dump.sh — hromadné zachytávání
+
+`tools/kube-dump.sh` spustí debug pod vedle každého vybraného podu a provede příkaz uvnitř jeho síťového namespace přes nsenter — bez nutnosti `kubectl exec` nebo privilegovaného kontejneru.
+
+Defaultní image je `nicolaka/netshoot` (obsahuje tcpdump, tshark, strace, ss, ip, curl, …).
+
+Zástupné znaky v příkazech:
+- `%t` — název cílového podu nebo nodu
+- `%n` — název nodu kde pod běží
+- `%f` — cesta k nahranému souboru (po `--import-file`)
+
+Vždy nastav kubeconfig před spuštěním:
+```bash
+export KUBECONFIG=$(pwd)/a-cluster.kubeconfig
+```
+
+---
+
+### Příklad 1 — jeden label, všechny namespace
+
+Zachytí provoz ze všech `traffic-external` podů najednou (team-alpha, team-beta, team-gamma):
+
+```bash
+export KUBECONFIG=$(pwd)/a-cluster.kubeconfig
+
+./tools/kube-dump.sh \
+  -l app=traffic-external \
+  -e 'tcpdump -i any -nn -s 0 -w /tmp/%t.pcap' \
+  -s 'ls /tmp/%t.pcap' \
+  -o ./captures/external-all \
+  --kill-switch-abs 50MB
+```
+
+Výstup v `captures/external-all/`:
+```
+traffic-external-xxx-team-alpha-command-0.log
+traffic-external-xxx-team-beta-command-0.log
+traffic-external-xxx-team-gamma-command-0.log
+traffic-external-xxx-team-alpha.pcap
+...
+```
+
+---
+
+### Příklad 2 — více labelů z různých namespace (OR logika)
+
+Zachytí provoz z `traffic-external` i `hello` podů zároveň — různé aplikace, různé namespace:
+
+```bash
+export KUBECONFIG=$(pwd)/a-cluster.kubeconfig
+
+./tools/kube-dump.sh \
+  -l app=traffic-external \
+  -l app=hello \
+  -e 'tcpdump -i any -nn -s 0 -c 200 -w /tmp/%t.pcap' \
+  -s 'ls /tmp/%t.pcap' \
+  -o ./captures/multi-label \
+  --kill-switch-abs 100MB
+```
+
+Každý `-l` je OR — skript najde pody splňující ANY selektor. V tomto případě 6 podů (3× traffic-external + 3× hello).
+
+---
+
+### Příklad 3 — network nody + tshark (HTTP dekódování)
+
+Worker5 a worker6 mají label `node-role=network` a hostují HAProxy. tshark na jejich `eth0` vidí veškerý ingress/egress:
+
+```bash
+export KUBECONFIG=$(pwd)/a-cluster.kubeconfig
+
+./tools/kube-dump.sh \
+  -L node-role=network \
+  -E 'tshark -i eth0 -f "tcp port 80" -T fields \
+    -e frame.time_relative \
+    -e ip.src \
+    -e ip.dst \
+    -e http.request.method \
+    -e http.request.uri \
+    -e http.response.code \
+    2>/dev/null | tee /tmp/%t-http.log' \
+  -S 'ls /tmp/%t-http.log' \
+  -o ./captures/network-nodes
+```
+
+Pro pcap místo live výpisu:
+```bash
+./tools/kube-dump.sh \
+  -L node-role=network \
+  -E 'tshark -i eth0 -f "tcp port 80" -w /tmp/%t.pcap' \
+  -S 'ls /tmp/%t.pcap' \
+  -o ./captures/network-nodes \
+  --kill-switch-abs 200MB
+```
+
+---
+
+### Příklad 4 — include-nodes, více -e a -E, import skriptu
+
+Zachytí síťový provoz v podu (nsenter → pod netns) a zároveň na nodu který pod hostuje — dvě různé vantage points najednou.
+
+Nejprve vytvoř lokální skript pro node-side diagnostiku:
+
+```bash
+cat > /tmp/node-egress-check.sh << 'EOF'
+#!/bin/sh
+echo "=== $(hostname) ==="
+echo "--- routing ---"
+ip route show
+echo "--- active TCP (dst :80) ---"
+ss -tun dst :80
+echo "--- last 30 SYN on eth0 ---"
+tcpdump -i eth0 -nn -c 30 'tcp[tcpflags] & tcp-syn != 0 and dst port 80' 2>/dev/null
+EOF
+```
+
+Spusť:
+```bash
+export KUBECONFIG=$(pwd)/a-cluster.kubeconfig
+
+./tools/kube-dump.sh \
+  -l app=traffic-external \
+  -e 'tcpdump -i eth0 -nn -s 0 -w /tmp/%t-pod.pcap' \
+  -e 'ss -tunap > /tmp/%t-sockets.txt' \
+  --include-nodes \
+  --import-file /tmp/node-egress-check.sh \
+  -E 'bash %f | tee /tmp/%t-node-diag.log' \
+  -E 'tcpdump -i eth0 -nn -s 0 -w /tmp/%t-node.pcap tcp port 80' \
+  -s 'ls /tmp/%t-pod.pcap /tmp/%t-sockets.txt' \
+  -S 'ls /tmp/%t-node-diag.log /tmp/%t-node.pcap' \
+  -o ./captures/egress-debug \
+  --kill-switch-abs 200MB
+```
+
+Co spouští:
+- `-e` příkaz 0 — tcpdump uvnitř pod netns (nsenter → `eth0` podu)
+- `-e` příkaz 1 — `ss` uvnitř pod netns (aktivní TCP spojení)
+- `--include-nodes` — automaticky zahrne worker nody kde pody běží
+- `-E` příkaz 0 — importovaný skript na nodu (routing + ss + SYN capture)
+- `-E` příkaz 1 — tcpdump na `eth0` nodu (vidí SNAT/masquerade výstup)
+
+---
+
+### Příklad 5 — strace síťových syscallů (s import-file)
+
+Vstoupí do PID i network namespace cílového podu a trasuje `connect`, `sendto`, `recvfrom` pro každý proces v kontejneru.
+
+```bash
+cat > /tmp/strace-net.sh << 'EOF'
+#!/bin/sh
+# Mount /proc aby strace viděl PIDs v cílovém PID namespace
+mount -t proc none /proc 2>/dev/null
+OUTDIR=/tmp/strace
+mkdir -p $OUTDIR
+# Spusť strace pro každý proces v kontejneru
+for pid in $(ls /proc | grep -E '^[0-9]+$'); do
+  [ -d /proc/$pid/fd ] || continue
+  strace -f -p $pid \
+    -e trace=network \
+    -e signal=none \
+    -o $OUTDIR/$pid.strace \
+    2>/dev/null &
+done
+sleep 30
+kill $(jobs -p) 2>/dev/null
+wait
+EOF
+```
+
+```bash
+export KUBECONFIG=$(pwd)/a-cluster.kubeconfig
+
+./tools/kube-dump.sh \
+  -l app=traffic-external \
+  -n team-gamma \
+  --import-file /tmp/strace-net.sh \
+  -e 'bash %f' \
+  --nsenter-params n,p \
+  -s 'ls /tmp/strace/*.strace' \
+  -o ./captures/strace-gamma \
+  --no-cleanup
+```
+
+`--nsenter-params n,p` — vstoupí do **network** i **PID** namespace podu. `--no-cleanup` nechá debug pod běžet pro případnou inspekci logů.
+
+Výstup: soubory `NNN.strace` pro každý PID v kontejneru, obsahují volání jako:
+```
+connect(5, {sa_family=AF_INET, sin_port=htons(80), sin_addr=inet_addr("172.18.0.15")}, 16) = 0
+sendto(5, "GET / HTTP/1.1\r\nHost: ...", ...)
+recvfrom(5, "HTTP/1.1 200 OK\r\n...", ...)
+```
