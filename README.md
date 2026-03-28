@@ -1,12 +1,14 @@
 # Kind Dual-Cluster Network Observability POC
 
+> **This documentation was AI-generated.** The goal was to test how far an AI can take a Kubernetes observability POC — from architecture to packet-level investigation tickets. The cluster setup, traffic flows, and capture commands have been tested against a running Kind environment. You have been warned.
+
 A two-cluster [Kind](https://kind.sigs.k8s.io/) environment built to demonstrate and capture every layer of Kubernetes network communication — from pod-to-pod within a namespace, through cross-namespace and cross-cluster traffic, to egress pinned via Cilium EgressGateway (visible as SNAT in Hubble and tcpdump).
 
 Designed as a hands-on POC for network analysis with `tcpdump`, `tshark`, Hubble UI, k9s, and radar.
 
 ## What you can observe
 
-| Communication type | Capture point | Příkaz |
+| Communication type | Capture point | Command |
 |--------------------|---------------|--------|
 | Pod to pod (same namespace, ClusterIP svc) | node — veth (node strana) | `oc debug node/<node> -- chroot /host tcpdump -i vethXXX -n` |
 | Pod to pod (same namespace, ClusterIP svc) | pod — eth0 | `oc debug node/<node> -- chroot /host bash -c 'nsenter -t $PID -n -- tcpdump -i eth0 -n'` |
