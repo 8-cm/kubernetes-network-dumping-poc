@@ -1,4 +1,4 @@
-# Kind Dual-Cluster Network Observability POC
+# Kind Dual-Cluster Network dumping POC
 
 > **This documentation was AI-generated.** The goal was to test how far an AI can take a Kubernetes observability POC — from architecture to packet-level investigation tickets. The cluster setup, traffic flows, and capture commands have been tested against a running Kind environment. You have been warned.
 
