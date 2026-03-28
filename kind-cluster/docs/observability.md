@@ -652,6 +652,28 @@ traffic-external-xxx-team-alpha.pcap
 
 ---
 
+### Příklad 1b — zápis na node filesystem, debug pody v dummy NS
+
+Pcap se zapíše přímo na disk nodu (`/host/var/tmp/`) — přežije restart debug podu a nespotřebuje ephemeral storage podu. Kill switch hlídá disk nodu, ne podu. Debug pody se vytvoří v namespace `dummy` (předpřipraven setup.sh).
+
+```bash
+export KUBECONFIG=$(pwd)/a-cluster.kubeconfig
+
+./kube-dump.sh \
+  -l app=traffic-monitor \
+  -e 'tcpdump -i any -nn -s 0 -w /host/var/tmp/POD_%t.pcap' \
+  -s 'ls /host/var/tmp/*.pcap' \
+  -o ./captures/external-all \
+  -n dummy \
+  --kill-switch-abs 50MB \
+  --install-deps \
+  --pod-volume /host/var/tmp
+```
+
+Zachytí všechny tři `traffic-monitor` pody (team-alpha, team-beta, team-gamma). Soubory `POD_<pod-name>.pcap` na každém nodu — staženy do `captures/external-all/`.
+
+---
+
 ### Příklad 2 — více labelů z různých namespace (OR logika)
 
 Zachytí provoz z `traffic-external` i `hello` podů zároveň — různé aplikace, různé namespace:
