@@ -1,0 +1,52 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:base",
+    ":dependencyDashboard",
+    ":semanticCommits",
+    "group:allNonMajor"
+  ],
+  "labels": ["renovate"],
+  "schedule": ["before 6am on monday"],
+  "kubernetes": {
+    "fileMatch": ["kind-cluster/apps/.+\\.yaml$"]
+  },
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Cilium Helm chart version in setup.sh",
+      "fileMatch": ["kind-cluster/setup\\.sh"],
+      "matchStrings": ["CILIUM_VERSION=\"(?<currentValue>[^\"]+)\""],
+      "depNameTemplate": "cilium",
+      "datasourceTemplate": "helm",
+      "registryUrlTemplate": "https://helm.cilium.io/"
+    },
+    {
+      "customType": "regex",
+      "description": "HAProxy Helm chart version in setup-haproxy.sh",
+      "fileMatch": ["kind-cluster/haproxy/setup-haproxy\\.sh"],
+      "matchStrings": ["HAPROXY_VERSION=\"(?<currentValue>[^\"]+)\""],
+      "depNameTemplate": "kubernetes-ingress",
+      "datasourceTemplate": "helm",
+      "registryUrlTemplate": "https://haproxytech.github.io/helm-charts"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Group all Helm chart updates together",
+      "matchDatasources": ["helm"],
+      "groupName": "helm charts"
+    },
+    {
+      "description": "Group all Docker image updates together",
+      "matchDatasources": ["docker"],
+      "groupName": "docker images"
+    },
+    {
+      "description": "Disable digest pinning for demo app images (intentionally floating)",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["nginx", "curlimages/curl"],
+      "pinDigests": false
+    }
+  ]
+}
